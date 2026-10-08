@@ -1,53 +1,34 @@
 import os
-from datetime import datetime, timedelta, timezone
-from flask import Flask, jsonify
 import requests
+from datetime import datetime, timedelta, timezone
 from dateutil import parser
 
-# ==================== FLASK APPLICATION INSTANCE ====================
-app = Flask(__name__)
+# Replace with your actual NewsAPI key or set it as an environment variable
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "YOUR_NEWS_API_KEY_HERE")
 
-# ==================== CONFIGURATION (FROM ENVIRONMENT VARIABLES) ====================
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
-GREEN_API_ID_INSTANCE = os.getenv("GREEN_API_ID_INSTANCE", "")
-GREEN_API_TOKEN_INSTANCE = os.getenv("GREEN_API_TOKEN_INSTANCE", "")
-RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
-
-# Custom endnote formatted as one single paragraph spanning two lines
-CUSTOM_FOOTER = os.getenv(
-    
-    "*Source:* Multiple Sources\n*Brought by:* RAC-FUTO Editorial Team"
-)
-
-
-# ==================== 1. FETCH & FILTER NEWS ====================
 def fetch_rotary_news():
-    """Fetches Rotary/Rotaract news using an expanded context query."""
+    """Fetches Rotary/Rotaract news with an optimized API query and broad local keyword filtering."""
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
 
-    # Broad query covering programs, designations, leaders, and core initiatives
-    query = (
-        '("Rotary" OR "Rotaract" OR "Interact Club" OR "Paul Harris Fellow" OR '
-        '"District Governor" OR "District Rotaract Representative" OR "RI President" OR '
-        '"Rotary International Convention" OR "Rotary District" OR "Rotaract District" OR '
-        '"Rotary Foundation" OR "End Polio Now" OR "PolioPlus" OR "Polio Plus" OR '
-        '"Rotary Project" OR "Rotaract Project" OR "World Polio Day" OR "RYLA" OR '
-        '"Rotary Youth Leadership" OR "Rotary Youth Exchange" OR "Service Above Self" OR '
-        '"People of Action")'
-    )
+    # Simplified query string passed as URL parameters to avoid NewsAPI internal 500 errors
+    query = 'Rotary OR Rotaract OR "Interact Club" OR "PolioPlus" OR "Paul Harris"'
 
-    url = (
-        f"https://newsapi.org/v2/everything?"
-        f"q={query}&"
-        f"from={seven_days_ago.strftime('%Y-%m-%d')}&"
-        f"sortBy=publishedAt&"
-        f"language=en&"
-        f"apiKey={NEWS_API_KEY}"
-    )
+    params = {
+        "q": query,
+        "from": seven_days_ago.strftime("%Y-%m-%d"),
+        "sortBy": "publishedAt",
+        "language": "en",
+        "apiKey": NEWS_API_KEY
+    }
 
     try:
-        response = requests.get(url, timeout=15)
+        response = requests.get("https://newsapi.org/v2/everything", params=params, timeout=15)
+        
+        if response.status_code != 200:
+            print(f"NewsAPI error: HTTP {response.status_code} - {response.text}")
+            return []
+            
         data = response.json()
     except Exception as e:
         print(f"Error making HTTP request to NewsAPI: {e}")
@@ -60,13 +41,14 @@ def fetch_rotary_news():
     articles = data.get("articles", [])
     valid_articles = []
 
+    # Irrelevant mechanical/commercial keywords to filter out
     junk_keywords = [
         "tool", "saw", "compressor", "encoder", "switch", 
         "amazon", "ebay", "valve", "engine", "hammer", "drill",
         "rotary phone", "rotary engine", "rotary dial"
     ]
 
-    # Expanded vocabulary list for local verification
+    # Broad vocabulary list for local verification and context matching
     rotary_vocab = [
         "rotary", "rotaract", "interact club", "district governor", 
         "district rotaract representative", "drr", "ri president", 
@@ -97,9 +79,11 @@ def fetch_rotary_news():
 
         text_content = f"{title} {desc} {article_url}".lower()
 
+        # Exclude articles containing junk keywords
         if any(junk in text_content for junk in junk_keywords):
             continue
 
+        # Keep articles matching any terms in the extended vocabulary list
         matched_terms = [kw for kw in rotary_vocab if kw in text_content]
         if matched_terms:
             high_priority_terms = [
@@ -109,6 +93,7 @@ def fetch_rotary_news():
                 "polioplus", "polio plus", "rotary project", "rotaract project",
                 "world polio day", "ryla"
             ]
+            
             relevance_score = 1 if any(term in matched_terms for term in high_priority_terms) else 2
 
             valid_articles.append({
@@ -122,91 +107,9 @@ def fetch_rotary_news():
     return valid_articles
 
 
-# ==================== 2. CUSTOM SORTING & EXPANSION ====================
-def sort_and_select_articles(articles):
-    tier_1, tier_2, tier_3, tier_4 = [], [], [], []
-
-    for art in articles:
-        is_recent = art["hours_old"] <= 48
-        is_relevant = art["relevance"] == 1
-
-        if is_recent and is_relevant:
-            tier_1.append(art)
-        elif is_recent and not is_relevant:
-            tier_2.append(art)
-        elif not is_recent and is_relevant:
-            tier_3.append(art)
-        else:
-            tier_4.append(art)
-
-    tier_1.sort(key=lambda x: x["published_at"], reverse=True)
-    tier_2.sort(key=lambda x: x["published_at"], reverse=True)
-    tier_3.sort(key=lambda x: x["published_at"], reverse=True)
-    tier_4.sort(key=lambda x: x["published_at"], reverse=True)
-
-    sorted_list = tier_1 + tier_2 + tier_3 + tier_4
-    target_count = 12 if len(sorted_list) >= 12 else min(10, len(sorted_list))
-
-    return sorted_list[:target_count]
-
-
-# ==================== 3. PAYLOAD FORMATTING ====================
-def format_whatsapp_message(articles, footer_text=""):
-    message = "Today's Biggest Headlines\n\n"
-    message += "Here are some of the news reports that you shouldn’t miss this morning:\n\n"
-
-    for idx, art in enumerate(articles, 1):
-        message += f"{idx}. {art['title']}\n{art['url']}\n\n"
-
-    if footer_text.strip():
-        message += f"{footer_text.strip()}\n"
-
-    return message.strip()
-
-
-# ==================== 4. DISPATCH VIA GREEN API ====================
-def send_whatsapp_message(message_text):
-    chat_id = f"{RECIPIENT_PHONE_NUMBER}@c.us"
-    url = f"https://api.green-api.com/waInstance{GREEN_API_ID_INSTANCE}/sendMessage/{GREEN_API_TOKEN_INSTANCE}"
-
-    payload = {
-        "chatId": chat_id,
-        "message": message_text
-    }
-    headers = {'Content-Type': 'application/json'}
-
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-        return response.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# ==================== FLASK ENDPOINTS ====================
-@app.route('/run-cron', methods=['GET', 'POST'])
-def run_cron_job():
-    if not all([NEWS_API_KEY, GREEN_API_ID_INSTANCE, GREEN_API_TOKEN_INSTANCE, RECIPIENT_PHONE_NUMBER]):
-        return jsonify({
-            "status": "error",
-            "message": "Missing environment variables on server."
-        }), 500
-
-    raw_articles = fetch_rotary_news()
-    selected_articles = sort_and_select_articles(raw_articles)
-
-    if not selected_articles:
-        return jsonify({"status": "success", "message": "No qualifying Rotary news found within 7 days."}), 200
-
-    compiled_message = format_whatsapp_message(selected_articles, CUSTOM_FOOTER)
-    green_api_res = send_whatsapp_message(compiled_message)
-
-    return jsonify({"status": "success", "green_api_response": green_api_res}), 200
-
-
-@app.route('/', methods=['GET'])
-def health_check():
-    return "Rotary News Automation Bot is Live!", 200
-
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    results = fetch_rotary_news()
+    print(f"Retrieved {len(results)} valid articles:\n")
+    for item in results:
+        print(f"-[Priority {item['relevance']}] {item['title']}")
+        print(f" Link: {item['url']}\n")
