@@ -15,7 +15,7 @@ RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 
 CUSTOM_FOOTER = os.getenv(
     "CUSTOM_FOOTER",
-    "Source: Multiple Sources\nBrought by: RAC-FUTO Editorial Team"
+    "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide.\n— Brought to you by The Editorial Team"
 )
 
 
@@ -167,9 +167,11 @@ def send_whatsapp_message(message_text):
 
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=8)
-        return response.json()
+        if response.status_code == 200:
+            return {"sent": True, "idMessage": response.json().get("idMessage", "")}
+        return {"sent": False, "status_code": response.status_code}
     except Exception as e:
-        return {"error": str(e)}
+        return {"sent": False, "error": str(e)}
 
 
 # ==================== FLASK ENDPOINTS ====================
@@ -178,26 +180,30 @@ def run_cron_job():
     if not all([NEWS_API_KEY, GREEN_API_ID_INSTANCE, GREEN_API_TOKEN_INSTANCE, RECIPIENT_PHONE_NUMBER]):
         return jsonify({
             "status": "error",
-            "message": "Missing environment variables on server."
+            "message": "Missing environment variables."
         }), 500
 
     raw_articles = fetch_rotary_news()
     selected_articles = sort_and_select_articles(raw_articles)
 
-    # Handle case where no articles are found
     if not selected_articles:
         no_news_msg = "Today's Biggest Headlines\n\nNo qualifying Rotary or Rotaract news reports were found in the past 7 days.\n\n" + CUSTOM_FOOTER.strip()
-        green_api_res = send_whatsapp_message(no_news_msg)
+        green_res = send_whatsapp_message(no_news_msg)
         return jsonify({
-            "status": "success",
-            "message": "No news found; fallback message sent to WhatsApp.",
-            "green_api_response": green_api_res
+            "status": "ok",
+            "count": 0,
+            "dispatched": green_res.get("sent", False)
         }), 200
 
     compiled_message = format_whatsapp_message(selected_articles, CUSTOM_FOOTER)
-    green_api_res = send_whatsapp_message(compiled_message)
+    green_res = send_whatsapp_message(compiled_message)
 
-    return jsonify({"status": "success", "green_api_response": green_api_res}), 200
+    # Returns a minimal JSON payload (~100 bytes) to stay well under cron-job limits
+    return jsonify({
+        "status": "ok",
+        "count": len(selected_articles),
+        "dispatched": green_res.get("sent", False)
+    }), 200
 
 
 @app.route('/', methods=['GET'])
