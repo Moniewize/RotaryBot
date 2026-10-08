@@ -13,7 +13,6 @@ GREEN_API_ID_INSTANCE = os.getenv("GREEN_API_ID_INSTANCE", "")
 GREEN_API_TOKEN_INSTANCE = os.getenv("GREEN_API_TOKEN_INSTANCE", "")
 RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 
-# Custom endnote formatted as one single paragraph spanning two lines
 CUSTOM_FOOTER = os.getenv(
     "CUSTOM_FOOTER",
     "Source: Multiple Sources\nBrought by RAC-FUTO Editorial Team"
@@ -22,11 +21,10 @@ CUSTOM_FOOTER = os.getenv(
 
 # ==================== 1. FETCH & FILTER NEWS ====================
 def fetch_rotary_news():
-    """Fetches Rotary/Rotaract news using an expanded vocabulary including projects and PolioPlus."""
+    """Fetches Rotary/Rotaract news with tight timeouts to respect 30s cron execution limits."""
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
 
-    # Simplified API query to prevent 500 errors on NewsAPI
     query = 'Rotary OR Rotaract OR "Interact Club" OR "PolioPlus" OR "Paul Harris"'
 
     params = {
@@ -34,11 +32,13 @@ def fetch_rotary_news():
         "from": seven_days_ago.strftime("%Y-%m-%d"),
         "sortBy": "publishedAt",
         "language": "en",
+        "pageSize": 30,  # Fast payload transfer
         "apiKey": NEWS_API_KEY
     }
 
     try:
-        response = requests.get("https://newsapi.org/v2/everything", params=params, timeout=15)
+        # Reduced timeout to 8 seconds so it fails fast if NewsAPI hangs
+        response = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
         data = response.json()
     except Exception as e:
         print(f"Error making HTTP request to NewsAPI: {e}")
@@ -51,14 +51,12 @@ def fetch_rotary_news():
     articles = data.get("articles", [])
     valid_articles = []
 
-    # Unwanted terms to drop commercial/hardware/non-news items
     junk_keywords = [
         "tool", "saw", "compressor", "encoder", "switch", 
         "amazon", "ebay", "valve", "engine", "hammer", "drill",
         "rotary phone", "rotary engine", "rotary dial", "rotary rig", "drilling rig"
     ]
 
-    # Specific Rotary vocabulary (removed bare 'rotary' to block false positives like 'rotary rig')
     rotary_vocab = [
         "rotaract", "interact club", "district governor", 
         "district rotaract representative", "drr", "ri president", 
@@ -89,14 +87,11 @@ def fetch_rotary_news():
 
         text_content = f"{title} {desc} {article_url}".lower()
 
-        # Reject hardware, e-commerce, or mechanical listings
         if any(junk in text_content for junk in junk_keywords):
             continue
 
-        # Check if text contains any term from our Rotary vocabulary
         matched_terms = [kw for kw in rotary_vocab if kw in text_content]
         if matched_terms:
-            # High priority tiering for specific organizational/project terms
             high_priority_terms = [
                 "rotary club", "rotaract club", "district governor", 
                 "district rotaract representative", "ri president", "rotary international",
@@ -172,7 +167,8 @@ def send_whatsapp_message(message_text):
     headers = {'Content-Type': 'application/json'}
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        # Reduced timeout to 8 seconds for Green API dispatch
+        response = requests.post(url, json=payload, headers=headers, timeout=8)
         return response.json()
     except Exception as e:
         return {"error": str(e)}
