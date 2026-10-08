@@ -13,7 +13,7 @@ GREEN_API_ID_INSTANCE = os.getenv("GREEN_API_ID_INSTANCE", "")
 GREEN_API_TOKEN_INSTANCE = os.getenv("GREEN_API_TOKEN_INSTANCE", "")
 RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 
-# Custom endnote formatted as one single paragraph spanning exactly two lines
+# Custom endnote formatted as one single paragraph spanning two lines
 CUSTOM_FOOTER = os.getenv(
     "CUSTOM_FOOTER",
     "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide.\n— Brought to you by The Editorial Team"
@@ -22,12 +22,18 @@ CUSTOM_FOOTER = os.getenv(
 
 # ==================== 1. FETCH & FILTER NEWS ====================
 def fetch_rotary_news():
-    """Fetches Rotary/Rotaract news with strict organization-focused matching and exclusion filters."""
+    """Fetches Rotary/Rotaract news using an expanded vocabulary including projects and PolioPlus."""
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
 
-    # Specific phrase query to avoid general hardware/mechanical "rotary" results
-    query = '("Rotary Club" OR "Rotaract Club" OR "Rotary International" OR "Rotaract")'
+    # Expanded query including project and campaign terminology
+    query = (
+        '("Rotary" OR "Rotaract" OR "Interact Club" OR "Paul Harris Fellow" OR '
+        '"District Governor" OR "District Rotaract Representative" OR "RI President" OR '
+        '"Rotary International Convention" OR "Rotary District" OR "Rotaract District" OR '
+        '"Rotary Foundation" OR "End Polio Now" OR "PolioPlus" OR "Polio Plus" OR '
+        '"Rotary Project" OR "Rotaract Project")'
+    )
 
     url = (
         f"https://newsapi.org/v2/everything?"
@@ -52,10 +58,21 @@ def fetch_rotary_news():
     articles = data.get("articles", [])
     valid_articles = []
 
-    # Unwanted terms to eliminate shopping listings and hardware products
+    # Unwanted terms to drop commercial/hardware/non-news items
     junk_keywords = [
         "tool", "saw", "compressor", "encoder", "switch", 
-        "amazon", "ebay", "valve", "engine", "hammer", "drill"
+        "amazon", "ebay", "valve", "engine", "hammer", "drill",
+        "rotary phone", "rotary engine", "rotary dial"
+    ]
+
+    # Rotary vocabulary for strict organizational relevance verification
+    rotary_vocab = [
+        "rotary", "rotaract", "interact club", "district governor", 
+        "district rotaract representative", "drr", "ri president", 
+        "rotary international", "rotary district", "rotaract district", 
+        "paul harris", "end polio", "polioplus", "polio plus", "rotary foundation", 
+        "service above self", "people of action", "rotary club", "rotaract club",
+        "rotary project", "rotaract project"
     ]
 
     for article in articles:
@@ -77,15 +94,21 @@ def fetch_rotary_news():
 
         text_content = f"{title} {desc} {article_url}".lower()
 
-        # Reject hardware, e-commerce, or mechanical tool listings
+        # Reject hardware, e-commerce, or mechanical listings
         if any(junk in text_content for junk in junk_keywords):
             continue
 
-        # Strictly verify organizational relevance
-        core_org_keywords = ["rotary club", "rotaract club", "rotary international", "rotaract", "paul harris", "end polio"]
-        if any(kw in text_content for kw in core_org_keywords):
-            # Relevance tiering (1 = core organizational keywords, 2 = general matches)
-            relevance_score = 1 if any(kw in text_content for kw in ["rotary club", "rotaract club", "rotary international"]) else 2
+        # Check if text contains any term from our Rotary vocabulary
+        matched_terms = [kw for kw in rotary_vocab if kw in text_content]
+        if matched_terms:
+            # High priority tiering for specific organizational/project terms
+            high_priority_terms = [
+                "rotary club", "rotaract club", "district governor", 
+                "district rotaract representative", "ri president", "rotary international",
+                "rotary district", "rotaract district", "paul harris", "rotary foundation",
+                "polioplus", "polio plus", "rotary project", "rotaract project"
+            ]
+            relevance_score = 1 if any(term in matched_terms for term in high_priority_terms) else 2
 
             valid_articles.append({
                 "title": title.strip(),
@@ -132,7 +155,6 @@ def format_whatsapp_message(articles, footer_text=""):
     message += "Here are some of the news reports that you shouldn’t miss this morning:\n\n"
 
     for idx, art in enumerate(articles, 1):
-        # Uses direct URL directly to eliminate middleman landing pages
         message += f"{idx}. {art['title']}\n{art['url']}\n\n"
 
     if footer_text.strip():
