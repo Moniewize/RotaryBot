@@ -3,10 +3,8 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, jsonify
 import requests
 from dateutil import parser
-import pyshorteners
 
 # ==================== FLASK APPLICATION INSTANCE ====================
-# Must be declared at the module level for Gunicorn (gunicorn main:app)
 app = Flask(__name__)
 
 # ==================== CONFIGURATION (FROM ENVIRONMENT VARIABLES) ====================
@@ -15,38 +13,25 @@ GREEN_API_ID_INSTANCE = os.getenv("GREEN_API_ID_INSTANCE", "")
 GREEN_API_TOKEN_INSTANCE = os.getenv("GREEN_API_TOKEN_INSTANCE", "")
 RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 
-CUSTOM_PARAGRAPH_1 = os.getenv(
-    "CUSTOM_PARAGRAPH_1",
-    "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide."
+# Custom endnote formatted as one single paragraph spanning exactly two lines
+CUSTOM_FOOTER = os.getenv(
+    "CUSTOM_FOOTER",
+    "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide.\n— Brought to you by The Editorial Team"
 )
-CUSTOM_PARAGRAPH_2 = os.getenv(
-    "CUSTOM_PARAGRAPH_2",
-    "— Brought to you by The Editorial Team"
-)
-
-
-# ==================== HELPER: URL SHORTENER ====================
-def shorten_url(long_url):
-    """Shortens a URL using TinyURL via pyshorteners."""
-    if not long_url:
-        return ""
-    try:
-        s = pyshorteners.Shortener()
-        return s.tinyurl.short(long_url)
-    except Exception as e:
-        print(f"Failed to shorten URL '{long_url}': {e}")
-        return long_url
 
 
 # ==================== 1. FETCH & FILTER NEWS ====================
 def fetch_rotary_news():
-    """Fetches Rotary/Rotaract news and applies strictly enforced 7-day cutoff."""
+    """Fetches Rotary/Rotaract news with strict organization-focused matching and exclusion filters."""
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
 
+    # Specific phrase query to avoid general hardware/mechanical "rotary" results
+    query = '("Rotary Club" OR "Rotaract Club" OR "Rotary International" OR "Rotaract")'
+
     url = (
         f"https://newsapi.org/v2/everything?"
-        f"q=(Rotary OR Rotaract)&"
+        f"q={query}&"
         f"from={seven_days_ago.strftime('%Y-%m-%d')}&"
         f"sortBy=publishedAt&"
         f"language=en&"
@@ -67,6 +52,12 @@ def fetch_rotary_news():
     articles = data.get("articles", [])
     valid_articles = []
 
+    # Unwanted terms to eliminate shopping listings and hardware products
+    junk_keywords = [
+        "tool", "saw", "compressor", "encoder", "switch", 
+        "amazon", "ebay", "valve", "engine", "hammer", "drill"
+    ]
+
     for article in articles:
         pub_time_str = article.get("publishedAt")
         if not pub_time_str:
@@ -77,22 +68,28 @@ def fetch_rotary_news():
         except Exception:
             continue
 
-        # Enforce strict 7-day age limit
         if pub_time < seven_days_ago:
             continue
 
         title = article.get("title") or ""
         desc = article.get("description") or ""
+        article_url = article.get("url") or ""
 
-        # Relevance filtering
-        text_content = f"{title} {desc}".lower()
-        if "rotary" in text_content or "rotaract" in text_content:
-            core_keywords = ["rotary club", "rotaract club", "rotary international", "polio", "paul harris"]
-            relevance_score = 1 if any(kw in text_content for kw in core_keywords) else 2
+        text_content = f"{title} {desc} {article_url}".lower()
+
+        # Reject hardware, e-commerce, or mechanical tool listings
+        if any(junk in text_content for junk in junk_keywords):
+            continue
+
+        # Strictly verify organizational relevance
+        core_org_keywords = ["rotary club", "rotaract club", "rotary international", "rotaract", "paul harris", "end polio"]
+        if any(kw in text_content for kw in core_org_keywords):
+            # Relevance tiering (1 = core organizational keywords, 2 = general matches)
+            relevance_score = 1 if any(kw in text_content for kw in ["rotary club", "rotaract club", "rotary international"]) else 2
 
             valid_articles.append({
                 "title": title.strip(),
-                "url": article.get("url"),
+                "url": article_url.strip(),
                 "published_at": pub_time,
                 "relevance": relevance_score,
                 "hours_old": (now - pub_time).total_seconds() / 3600.0
@@ -103,12 +100,6 @@ def fetch_rotary_news():
 
 # ==================== 2. CUSTOM SORTING & EXPANSION ====================
 def sort_and_select_articles(articles):
-    """
-    Sort Order Rules:
-    1. MOST RECENT AND MOST RELEVANT FIRST (Recent <= 48h AND Relevance == 1)
-    2. MORE RECENT AND LESS RELEVANT SECOND (Recent <= 48h AND Relevance == 2)
-    3. MORE RELEVANT AND LESS RECENT THIRD (Recent > 48h AND Relevance == 1)
-    """
     tier_1, tier_2, tier_3, tier_4 = [], [], [], []
 
     for art in articles:
@@ -136,27 +127,22 @@ def sort_and_select_articles(articles):
 
 
 # ==================== 3. PAYLOAD FORMATTING ====================
-def format_whatsapp_message(articles, p1="", p2=""):
-    """Formats payload matching template with shortened links and two footer paragraphs."""
+def format_whatsapp_message(articles, footer_text=""):
     message = "Today's Biggest Headlines\n\n"
     message += "Here are some of the news reports that you shouldn’t miss this morning:\n\n"
 
     for idx, art in enumerate(articles, 1):
-        short_link = shorten_url(art['url'])
-        message += f"{idx}. {art['title']}\n{short_link}\n\n"
+        # Uses direct URL directly to eliminate middleman landing pages
+        message += f"{idx}. {art['title']}\n{art['url']}\n\n"
 
-    if p1.strip():
-        message += f"{p1.strip()}\n\n"
-
-    if p2.strip():
-        message += f"{p2.strip()}\n"
+    if footer_text.strip():
+        message += f"{footer_text.strip()}\n"
 
     return message.strip()
 
 
 # ==================== 4. DISPATCH VIA GREEN API ====================
 def send_whatsapp_message(message_text):
-    """Sends single compiled chat message via GREEN API."""
     chat_id = f"{RECIPIENT_PHONE_NUMBER}@c.us"
     url = f"https://api.green-api.com/waInstance{GREEN_API_ID_INSTANCE}/sendMessage/{GREEN_API_TOKEN_INSTANCE}"
 
@@ -176,7 +162,6 @@ def send_whatsapp_message(message_text):
 # ==================== FLASK ENDPOINTS ====================
 @app.route('/run-cron', methods=['GET', 'POST'])
 def run_cron_job():
-    """Webhook endpoint triggered by cron-job.org."""
     if not all([NEWS_API_KEY, GREEN_API_ID_INSTANCE, GREEN_API_TOKEN_INSTANCE, RECIPIENT_PHONE_NUMBER]):
         return jsonify({
             "status": "error",
@@ -189,7 +174,7 @@ def run_cron_job():
     if not selected_articles:
         return jsonify({"status": "success", "message": "No qualifying Rotary news found within 7 days."}), 200
 
-    compiled_message = format_whatsapp_message(selected_articles, CUSTOM_PARAGRAPH_1, CUSTOM_PARAGRAPH_2)
+    compiled_message = format_whatsapp_message(selected_articles, CUSTOM_FOOTER)
     green_api_res = send_whatsapp_message(compiled_message)
 
     return jsonify({"status": "success", "green_api_response": green_api_res}), 200
@@ -197,7 +182,6 @@ def run_cron_job():
 
 @app.route('/', methods=['GET'])
 def health_check():
-    """Root health check endpoint."""
     return "Rotary News Automation Bot is Live!", 200
 
 
