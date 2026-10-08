@@ -1,20 +1,28 @@
+import os
 from datetime import datetime, timedelta, timezone
+from flask import Flask, jsonify
 import requests
 from dateutil import parser
 import pyshorteners
 
-# ==================== CONFIGURATION ====================
-NEWS_API_KEY = "YOUR_NEWS_API_KEY"  # Get from newsapi.org or use Google News RSS parser
-GREEN_API_ID_INSTANCE = "YOUR_ID_INSTANCE"  # Found in GREEN API console
-GREEN_API_TOKEN_INSTANCE = "YOUR_API_TOKEN_INSTANCE"  # Found in GREEN API console
-RECIPIENT_PHONE_NUMBER = "1234567890"  # International format without '+' (e.g., 2348012345678)
+# ==================== FLASK APPLICATION INSTANCE ====================
+# Must be declared at the module level for Gunicorn (gunicorn main:app)
+app = Flask(__name__)
 
-# TWO PARAGRAPHS FOR THE FOOTER
-CUSTOM_PARAGRAPH_1 = "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide."
-CUSTOM_PARAGRAPH_2 = "— Brought to you by The Editorial Team"
+# ==================== CONFIGURATION (FROM ENVIRONMENT VARIABLES) ====================
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+GREEN_API_ID_INSTANCE = os.getenv("GREEN_API_ID_INSTANCE", "")
+GREEN_API_TOKEN_INSTANCE = os.getenv("GREEN_API_TOKEN_INSTANCE", "")
+RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 
-# WhatsApp Chat ID format for GREEN API
-CHAT_ID = f"{RECIPIENT_PHONE_NUMBER}@c.us"
+CUSTOM_PARAGRAPH_1 = os.getenv(
+    "CUSTOM_PARAGRAPH_1",
+    "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide."
+)
+CUSTOM_PARAGRAPH_2 = os.getenv(
+    "CUSTOM_PARAGRAPH_2",
+    "— Brought to you by The Editorial Team"
+)
 
 
 # ==================== HELPER: URL SHORTENER ====================
@@ -27,7 +35,7 @@ def shorten_url(long_url):
         return s.tinyurl.short(long_url)
     except Exception as e:
         print(f"Failed to shorten URL '{long_url}': {e}")
-        return long_url  # Fallback to original URL if shortening fails
+        return long_url
 
 
 # ==================== 1. FETCH & FILTER NEWS ====================
@@ -45,11 +53,15 @@ def fetch_rotary_news():
         f"apiKey={NEWS_API_KEY}"
     )
 
-    response = requests.get(url)
-    data = response.json()
+    try:
+        response = requests.get(url, timeout=15)
+        data = response.json()
+    except Exception as e:
+        print(f"Error making HTTP request to NewsAPI: {e}")
+        return []
 
     if data.get("status") != "ok":
-        print(f"Error fetching news: {data.get('message')}")
+        print(f"Error fetching news from API: {data.get('message')}")
         return []
 
     articles = data.get("articles", [])
@@ -60,7 +72,10 @@ def fetch_rotary_news():
         if not pub_time_str:
             continue
 
-        pub_time = parser.parse(pub_time_str)
+        try:
+            pub_time = parser.parse(pub_time_str)
+        except Exception:
+            continue
 
         # Enforce strict 7-day age limit
         if pub_time < seven_days_ago:
@@ -142,35 +157,49 @@ def format_whatsapp_message(articles, p1="", p2=""):
 # ==================== 4. DISPATCH VIA GREEN API ====================
 def send_whatsapp_message(message_text):
     """Sends single compiled chat message via GREEN API."""
+    chat_id = f"{RECIPIENT_PHONE_NUMBER}@c.us"
     url = f"https://api.green-api.com/waInstance{GREEN_API_ID_INSTANCE}/sendMessage/{GREEN_API_TOKEN_INSTANCE}"
 
     payload = {
-        "chatId": CHAT_ID,
+        "chatId": chat_id,
         "message": message_text
     }
     headers = {'Content-Type': 'application/json'}
 
-    response = requests.post(url, json=payload, headers=headers)
-    return response.json()
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        return response.json()
+    except Exception as e:
+        return {"error": str(e)}
 
 
-# ==================== MAIN EXECUTION ====================
-if __name__ == "__main__":
-    print("Fetching news...")
+# ==================== FLASK ENDPOINTS ====================
+@app.route('/run-cron', methods=['GET', 'POST'])
+def run_cron_job():
+    """Webhook endpoint triggered by cron-job.org."""
+    if not all([NEWS_API_KEY, GREEN_API_ID_INSTANCE, GREEN_API_TOKEN_INSTANCE, RECIPIENT_PHONE_NUMBER]):
+        return jsonify({
+            "status": "error",
+            "message": "Missing environment variables on server."
+        }), 500
+
     raw_articles = fetch_rotary_news()
-
-    print(f"Found {len(raw_articles)} candidate articles within 7 days.")
     selected_articles = sort_and_select_articles(raw_articles)
 
     if not selected_articles:
-        print("No qualifying Rotary/Rotaract news found within the past 7 days.")
-    else:
-        print("Shortening links and formatting message...")
-        compiled_message = format_whatsapp_message(selected_articles, CUSTOM_PARAGRAPH_1, CUSTOM_PARAGRAPH_2)
+        return jsonify({"status": "success", "message": "No qualifying Rotary news found within 7 days."}), 200
 
-        print("\n--- Message Preview ---\n")
-        print(compiled_message)
-        print("\n-----------------------\n")
+    compiled_message = format_whatsapp_message(selected_articles, CUSTOM_PARAGRAPH_1, CUSTOM_PARAGRAPH_2)
+    green_api_res = send_whatsapp_message(compiled_message)
 
-        result = send_whatsapp_message(compiled_message)
-        print("GREEN API Response:", result)
+    return jsonify({"status": "success", "green_api_response": green_api_res}), 200
+
+
+@app.route('/', methods=['GET'])
+def health_check():
+    """Root health check endpoint."""
+    return "Rotary News Automation Bot is Live!", 200
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
