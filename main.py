@@ -15,7 +15,7 @@ RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 
 CUSTOM_FOOTER = os.getenv(
     "CUSTOM_FOOTER",
-    "Source: Multiple Sources\nBrought by RAC-FUTO Editorial Team"
+    "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide.\n— Brought to you by The Editorial Team"
 )
 
 
@@ -32,12 +32,11 @@ def fetch_rotary_news():
         "from": seven_days_ago.strftime("%Y-%m-%d"),
         "sortBy": "publishedAt",
         "language": "en",
-        "pageSize": 30,  # Fast payload transfer
+        "pageSize": 30,
         "apiKey": NEWS_API_KEY
     }
 
     try:
-        # Reduced timeout to 8 seconds so it fails fast if NewsAPI hangs
         response = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
         data = response.json()
     except Exception as e:
@@ -167,7 +166,6 @@ def send_whatsapp_message(message_text):
     headers = {'Content-Type': 'application/json'}
 
     try:
-        # Reduced timeout to 8 seconds for Green API dispatch
         response = requests.post(url, json=payload, headers=headers, timeout=8)
         return response.json()
     except Exception as e:
@@ -186,8 +184,15 @@ def run_cron_job():
     raw_articles = fetch_rotary_news()
     selected_articles = sort_and_select_articles(raw_articles)
 
+    # Handle case where no articles are found
     if not selected_articles:
-        return jsonify({"status": "success", "message": "No qualifying Rotary news found within 7 days."}), 200
+        no_news_msg = "Today's Biggest Headlines\n\nNo qualifying Rotary or Rotaract news reports were found in the past 7 days.\n\n" + CUSTOM_FOOTER.strip()
+        green_api_res = send_whatsapp_message(no_news_msg)
+        return jsonify({
+            "status": "success",
+            "message": "No news found; fallback message sent to WhatsApp.",
+            "green_api_response": green_api_res
+        }), 200
 
     compiled_message = format_whatsapp_message(selected_articles, CUSTOM_FOOTER)
     green_api_res = send_whatsapp_message(compiled_message)
