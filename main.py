@@ -16,7 +16,7 @@ RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 # Custom endnote formatted as one single paragraph spanning two lines
 CUSTOM_FOOTER = os.getenv(
     "CUSTOM_FOOTER",
-    "Source: Multiple Sources.\n Brought by RAC-FUTO Editorial Team"
+    "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide.\n— Brought to you by The Editorial Team"
 )
 
 
@@ -55,18 +55,19 @@ def fetch_rotary_news():
     junk_keywords = [
         "tool", "saw", "compressor", "encoder", "switch", 
         "amazon", "ebay", "valve", "engine", "hammer", "drill",
-        "rotary phone", "rotary engine", "rotary dial"
+        "rotary phone", "rotary engine", "rotary dial", "rotary rig", "drilling rig"
     ]
 
-    # Rotary vocabulary for strict organizational relevance verification
+    # Specific Rotary vocabulary (removed bare 'rotary' to block false positives like 'rotary rig')
     rotary_vocab = [
-        "rotary", "rotaract", "interact club", "district governor", 
+        "rotaract", "interact club", "district governor", 
         "district rotaract representative", "drr", "ri president", 
         "rotary international", "rotary district", "rotaract district", 
-        "paul harris", "end polio", "polioplus", "polio plus", "rotary foundation", "rotary club", "rotaract club",
+        "paul harris", "end polio", "polioplus", "polio plus", "rotary foundation", 
+        "service above self", "people of action", "rotary club", "rotaract club",
         "rotary project", "rotaract project", "world polio day", "ryla",
         "rotary youth leadership", "rotary youth exchange", "four-way test",
-        "4-way test", "district conference", "rotary fellowships"
+        "4-way test", "discon", "rotary fellowships"
     ]
 
     for article in articles:
@@ -98,10 +99,10 @@ def fetch_rotary_news():
             # High priority tiering for specific organizational/project terms
             high_priority_terms = [
                 "rotary club", "rotaract club", "district governor", 
-                "district rotaract representative", "RI president", "rotary international",
-                "rotary district", "rotaract district", "Paul Harris Fellow", "rotary foundation",
+                "district rotaract representative", "ri president", "rotary international",
+                "rotary district", "rotaract district", "paul harris", "rotary foundation",
                 "polioplus", "polio plus", "rotary project", "rotaract project",
-                "world polio day", "RYLA"
+                "world polio day", "ryla"
             ]
             relevance_score = 1 if any(term in matched_terms for term in high_priority_terms) else 2
 
@@ -150,7 +151,8 @@ def format_whatsapp_message(articles, footer_text=""):
     message += "Here are some of the news reports that you shouldn’t miss this morning:\n\n"
 
     for idx, art in enumerate(articles, 1):
-        message += f"{idx}. {art['title']}\n{art['url']}\n\n"
+        clean_url = art['url'].strip()
+        message += f"{idx}. {art['title']}\n{clean_url}\n\n"
 
     if footer_text.strip():
         message += f"{footer_text.strip()}\n"
