@@ -26,26 +26,19 @@ def fetch_rotary_news():
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
 
-    # Expanded query including project and campaign terminology
-    query = (
-        '("Rotary" OR "Rotaract" OR "Interact Club" OR "Paul Harris Fellow" OR '
-        '"District Governor" OR "District Rotaract Representative" OR "RI President" OR '
-        '"Rotary International Convention" OR "Rotary District" OR "Rotaract District" OR '
-        '"Rotary Foundation" OR "End Polio Now" OR "PolioPlus" OR "Polio Plus" OR '
-        '"Rotary Project" OR "Rotaract Project")'
-    )
+    # Simplified API query to prevent 500 errors on NewsAPI
+    query = 'Rotary OR Rotaract OR "Interact Club" OR "PolioPlus" OR "Paul Harris"'
 
-    url = (
-        f"https://newsapi.org/v2/everything?"
-        f"q={query}&"
-        f"from={seven_days_ago.strftime('%Y-%m-%d')}&"
-        f"sortBy=publishedAt&"
-        f"language=en&"
-        f"apiKey={NEWS_API_KEY}"
-    )
+    params = {
+        "q": query,
+        "from": seven_days_ago.strftime("%Y-%m-%d"),
+        "sortBy": "publishedAt",
+        "language": "en",
+        "apiKey": NEWS_API_KEY
+    }
 
     try:
-        response = requests.get(url, timeout=15)
+        response = requests.get("https://newsapi.org/v2/everything", params=params, timeout=15)
         data = response.json()
     except Exception as e:
         print(f"Error making HTTP request to NewsAPI: {e}")
@@ -72,7 +65,9 @@ def fetch_rotary_news():
         "rotary international", "rotary district", "rotaract district", 
         "paul harris", "end polio", "polioplus", "polio plus", "rotary foundation", 
         "service above self", "people of action", "rotary club", "rotaract club",
-        "rotary project", "rotaract project"
+        "rotary project", "rotaract project", "world polio day", "ryla",
+        "rotary youth leadership", "rotary youth exchange", "four-way test",
+        "4-way test", "discon", "rotary fellowships"
     ]
 
     for article in articles:
@@ -106,7 +101,8 @@ def fetch_rotary_news():
                 "rotary club", "rotaract club", "district governor", 
                 "district rotaract representative", "ri president", "rotary international",
                 "rotary district", "rotaract district", "paul harris", "rotary foundation",
-                "polioplus", "polio plus", "rotary project", "rotaract project"
+                "polioplus", "polio plus", "rotary project", "rotaract project",
+                "world polio day", "ryla"
             ]
             relevance_score = 1 if any(term in matched_terms for term in high_priority_terms) else 2
 
