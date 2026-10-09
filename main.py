@@ -1,13 +1,20 @@
 import os
 from datetime import datetime, timedelta, timezone
-from flask import Flask, jsonify
+from flask import Flask, make_response
 import requests
 from dateutil import parser
 
 # ==================== FLASK APPLICATION INSTANCE ====================
 app = Flask(__name__)
 
-# ==================== CONFIGURATION (FROM ENVIRONMENT VARIABLES) ====================
+# Strip all excess HTTP headers to prevent "Output too large" errors on cron-job.org
+@app.after_request
+def minimize_headers(response):
+    response.headers.clear()
+    response.headers['Content-Type'] = 'text/plain'
+    return response
+
+# ==================== CONFIGURATION ====================
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 GREEN_API_ID_INSTANCE = os.getenv("GREEN_API_ID_INSTANCE", "")
 GREEN_API_TOKEN_INSTANCE = os.getenv("GREEN_API_TOKEN_INSTANCE", "")
@@ -15,47 +22,56 @@ RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 
 CUSTOM_FOOTER = os.getenv(
     "CUSTOM_FOOTER",
-    "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide.\n— Brought to you by The Editorial Team"
+    "*Source:* The Punch \n*Brought by*: RAC-FUTO Editorial Team"
 )
+
+# Global Catch-All: Returns plain text "ERROR" instead of heavy HTML stack traces
+@app.errorhandler(Exception)
+def handle_global_exception(e):
+    return make_response("ERROR", 200)
 
 
 # ==================== 1. FETCH & FILTER NEWS ====================
 def fetch_rotary_news():
-    """Fetches Rotary/Rotaract news with tight timeouts to respect 30s cron execution limits."""
+    """Fetches high-relevance Rotary/Rotaract news across the last 14 days (2 weeks) with extra verification checks."""
     now = datetime.now(timezone.utc)
-    seven_days_ago = now - timedelta(days=7)
+    two_weeks_ago = now - timedelta(days=14)
 
     query = 'Rotary OR Rotaract OR "Interact Club" OR "PolioPlus" OR "Paul Harris"'
 
     params = {
         "q": query,
-        "from": seven_days_ago.strftime("%Y-%m-%d"),
-        "sortBy": "publishedAt",
+        "from": two_weeks_ago.strftime("%Y-%m-%d"),
+        "to": now.strftime("%Y-%m-%d"),
+        "sortBy": "relevance",
         "language": "en",
-        "pageSize": 30,
+        "pageSize": 40,
         "apiKey": NEWS_API_KEY
     }
 
     try:
-        response = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
+        response = requests.get("https://newsapi.org/v2/everything", params=params, timeout=6)
+        if response.status_code != 200:
+            return []
         data = response.json()
-    except Exception as e:
-        print(f"Error making HTTP request to NewsAPI: {e}")
+    except Exception:
         return []
 
-    if data.get("status") != "ok":
-        print(f"Error fetching news from API: {data.get('message')}")
+    if not isinstance(data, dict) or data.get("status") != "ok":
         return []
 
     articles = data.get("articles", [])
     valid_articles = []
 
+    # Unwanted mechanical/commercial terms
     junk_keywords = [
         "tool", "saw", "compressor", "encoder", "switch", 
         "amazon", "ebay", "valve", "engine", "hammer", "drill",
-        "rotary phone", "rotary engine", "rotary dial", "rotary rig", "drilling rig"
+        "rotary phone", "rotary engine", "rotary dial", "rotary rig", "drilling rig",
+        "machinery", "automotive", "piston", "internal combustion"
     ]
 
+    # Specific Rotary vocabulary
     rotary_vocab = [
         "rotaract", "interact club", "district governor", 
         "district rotaract representative", "drr", "ri president", 
@@ -67,7 +83,16 @@ def fetch_rotary_news():
         "4-way test", "discon", "rotary fellowships"
     ]
 
+    # Headline-level keywords (Title must contain at least ONE of these)
+    title_must_contain = [
+        "rotary", "rotaract", "interact", "polio", "paul harris", 
+        "district governor", "ryla", "service above self"
+    ]
+
     for article in articles:
+        if not isinstance(article, dict):
+            continue
+
         pub_time_str = article.get("publishedAt")
         if not pub_time_str:
             continue
@@ -77,18 +102,25 @@ def fetch_rotary_news():
         except Exception:
             continue
 
-        if pub_time < seven_days_ago:
+        if pub_time < two_weeks_ago:
             continue
 
-        title = article.get("title") or ""
-        desc = article.get("description") or ""
-        article_url = article.get("url") or ""
+        title = (article.get("title") or "").strip()
+        desc = (article.get("description") or "").strip()
+        article_url = (article.get("url") or "").strip()
 
+        title_lower = title.lower()
         text_content = f"{title} {desc} {article_url}".lower()
 
+        # CHECK 1: Headline Quality Check (Title MUST contain a primary Rotary term)
+        if not any(term in title_lower for term in title_must_contain):
+            continue
+
+        # CHECK 2: Strict Exclusion Check (Drop if any junk keyword exists in title or body)
         if any(junk in text_content for junk in junk_keywords):
             continue
 
+        # CHECK 3: Organizational Vocabulary Verification
         matched_terms = [kw for kw in rotary_vocab if kw in text_content]
         if matched_terms:
             high_priority_terms = [
@@ -100,9 +132,14 @@ def fetch_rotary_news():
             ]
             relevance_score = 1 if any(term in matched_terms for term in high_priority_terms) else 2
 
+            # CHECK 4: Domain Relevance Boost
+            # If the URL itself comes from a known Rotary domain, give it highest priority
+            if "rotary" in article_url or "rotaract" in article_url:
+                relevance_score = 1
+
             valid_articles.append({
-                "title": title.strip(),
-                "url": article_url.strip(),
+                "title": title,
+                "url": article_url,
                 "published_at": pub_time,
                 "relevance": relevance_score,
                 "hours_old": (now - pub_time).total_seconds() / 3600.0
@@ -116,7 +153,7 @@ def sort_and_select_articles(articles):
     tier_1, tier_2, tier_3, tier_4 = [], [], [], []
 
     for art in articles:
-        is_recent = art["hours_old"] <= 48
+        is_recent = art["hours_old"] <= 336  # Within 14 days
         is_relevant = art["relevance"] == 1
 
         if is_recent and is_relevant:
@@ -134,7 +171,7 @@ def sort_and_select_articles(articles):
     tier_4.sort(key=lambda x: x["published_at"], reverse=True)
 
     sorted_list = tier_1 + tier_2 + tier_3 + tier_4
-    target_count = 12 if len(sorted_list) >= 12 else min(10, len(sorted_list))
+    target_count = 10 if len(sorted_list) >= 10 else len(sorted_list)
 
     return sorted_list[:target_count]
 
@@ -142,7 +179,7 @@ def sort_and_select_articles(articles):
 # ==================== 3. PAYLOAD FORMATTING ====================
 def format_whatsapp_message(articles, footer_text=""):
     message = "Today's Biggest Headlines\n\n"
-    message += "Here are some of the news reports that you shouldn’t miss this morning:\n\n"
+    message += "Here are some of the news reports that you shouldn’t miss from the past two weeks:\n\n"
 
     for idx, art in enumerate(articles, 1):
         clean_url = art['url'].strip()
@@ -166,49 +203,34 @@ def send_whatsapp_message(message_text):
     headers = {'Content-Type': 'application/json'}
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=8)
-        if response.status_code == 200:
-            return {"sent": True, "idMessage": response.json().get("idMessage", "")}
-        return {"sent": False, "status_code": response.status_code}
-    except Exception as e:
-        return {"sent": False, "error": str(e)}
+        requests.post(url, json=payload, headers=headers, timeout=6)
+    except Exception:
+        pass
 
 
 # ==================== FLASK ENDPOINTS ====================
 @app.route('/run-cron', methods=['GET', 'POST'])
 def run_cron_job():
     if not all([NEWS_API_KEY, GREEN_API_ID_INSTANCE, GREEN_API_TOKEN_INSTANCE, RECIPIENT_PHONE_NUMBER]):
-        return jsonify({
-            "status": "error",
-            "message": "Missing environment variables."
-        }), 500
+        return make_response("MISSING_VARS", 200)
 
     raw_articles = fetch_rotary_news()
     selected_articles = sort_and_select_articles(raw_articles)
 
     if not selected_articles:
-        no_news_msg = "Today's Biggest Headlines\n\nNo qualifying Rotary or Rotaract news reports were found in the past 7 days.\n\n" + CUSTOM_FOOTER.strip()
-        green_res = send_whatsapp_message(no_news_msg)
-        return jsonify({
-            "status": "ok",
-            "count": 0,
-            "dispatched": green_res.get("sent", False)
-        }), 200
+        no_news_msg = "Today's Biggest Headlines\n\nNo major Rotary or Rotaract news reports were found in the last two weeks.\n\n" + CUSTOM_FOOTER.strip()
+        send_whatsapp_message(no_news_msg)
+        return make_response("OK", 200)
 
     compiled_message = format_whatsapp_message(selected_articles, CUSTOM_FOOTER)
-    green_res = send_whatsapp_message(compiled_message)
+    send_whatsapp_message(compiled_message)
 
-    # Returns a minimal JSON payload (~100 bytes) to stay well under cron-job limits
-    return jsonify({
-        "status": "ok",
-        "count": len(selected_articles),
-        "dispatched": green_res.get("sent", False)
-    }), 200
+    return make_response("OK", 200)
 
 
 @app.route('/', methods=['GET'])
 def health_check():
-    return "Rotary News Automation Bot is Live!", 200
+    return make_response("OK", 200)
 
 
 if __name__ == '__main__':
