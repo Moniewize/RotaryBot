@@ -23,7 +23,7 @@ RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 
 CUSTOM_FOOTER = os.getenv(
     "CUSTOM_FOOTER",
-    "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide.\n— Brought to you by The Editorial Team"
+    "*Source:* rotary.org and other affiliated sources\n*Brought by:* RAC-FUTO Editorial Team"
 )
 
 def clean_url(raw_url):
