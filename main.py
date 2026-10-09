@@ -27,7 +27,7 @@ CUSTOM_FOOTER = os.getenv(
 )
 
 def clean_url(raw_url):
-    """Strips tracking query parameters to ensure clean, direct links."""
+    """Strips query parameters to ensure clean, direct links."""
     if not raw_url:
         return ""
     parsed = urlparse(raw_url.strip())
@@ -40,10 +40,10 @@ def handle_global_exception(e):
 
 # ==================== 1. PRIMARY SOURCE: ROTARY.ORG ====================
 def fetch_primary_rotary_org(now_utc):
-    """Parses primary official rotary.org RSS feed and direct newsroom scraper."""
+    """Scrapes primary official news from https://www.rotary.org/en/news-and-stories."""
     articles = []
 
-    # 1A. RSS Feed from rotary.org
+    # 1A. Direct RSS Feed from rotary.org
     try:
         feed = feedparser.parse("https://www.rotary.org/rss.xml")
         for entry in feed.entries:
@@ -85,7 +85,7 @@ def fetch_primary_rotary_org(now_utc):
                 href = a_tag["href"]
                 if "/en/articles/" in href:
                     title = a_tag.get_text(strip=True)
-                    if not title or len(title) < 15 or title.lower() in ["read more", "news and stories"]:
+                    if not title or len(title) < 15 or title.lower() in ["read more", "news and stories", "all news and stories"]:
                         continue
 
                     full_url = urljoin("https://www.rotary.org", href)
@@ -102,13 +102,12 @@ def fetch_primary_rotary_org(now_utc):
     return articles
 
 
-# ==================== 2. SECONDARY & REGIONAL SOURCES ====================
+# ==================== 2. SECONDARY SOURCES ====================
 def fetch_secondary_rotary_feeds(now_utc):
-    """Parses Intercountry Committees, Rotary News Online, and Official Rotary Blogs."""
+    """Parses strictly Rotary Intercountry Committees and Rotary News Online."""
     secondary_feeds = [
         ("Rotary Intercountry Committees", "https://rotary-icc.org/feed/", 2),
-        ("Rotary News Online", "https://rotarynewsonline.org/feed/", 3),
-        ("Rotary Voices / Blog", "https://blog.rotary.org/feed/", 4)
+        ("Rotary News Online", "https://rotarynewsonline.org/feed/", 3)
     ]
 
     articles = []
@@ -152,10 +151,10 @@ def get_top_10_rotary_news():
     """Builds top 10 articles strictly adhering to site hierarchy and date recency."""
     now_utc = datetime.now(timezone.utc)
 
-    # Fetch primary site news first
+    # 1. Fetch Primary site candidates (rotary.org)
     primary_candidates = fetch_primary_rotary_org(now_utc)
     
-    # Fetch secondary regional feeds
+    # 2. Fetch Secondary site candidates
     secondary_candidates = fetch_secondary_rotary_feeds(now_utc)
 
     all_candidates = primary_candidates + secondary_candidates
@@ -180,7 +179,7 @@ def get_top_10_rotary_news():
         else:
             older_articles.append(item)
 
-    # Sort recent articles: Primary site priority first, then publication date descending
+    # Priority sorting: Primary site first (priority=1), then publication date descending
     recent_articles.sort(key=lambda x: (x["priority"], -x["published_at"].timestamp()))
     older_articles.sort(key=lambda x: (x["priority"], -x["published_at"].timestamp()))
 
@@ -199,7 +198,7 @@ def get_top_10_rotary_news():
 def format_whatsapp_message(articles, footer_text=""):
     message_lines = [
         "📌 *Rotary & Rotaract Global News Update*\n",
-        "Here are today's top official reports and featured projects:\n"
+        "Here are today's top official reports and featured initiatives:\n"
     ]
 
     for idx, art in enumerate(articles, 1):
@@ -237,8 +236,9 @@ def run_cron_job():
 
     selected_articles = get_top_10_rotary_news()
 
+    # If scraping yields no results, send explicit WhatsApp notification
     if not selected_articles:
-        no_news_msg = "📌 *Rotary & Rotaract Global News Update*\n\nNo major Rotary news reports were found.\n\n" + CUSTOM_FOOTER.strip()
+        no_news_msg = "📌 *Rotary & Rotaract Global News Update*\n\nThere are currently no new posts or updates available.\n\n" + CUSTOM_FOOTER.strip()
         send_whatsapp_message(no_news_msg)
         return make_response("OK", 200)
 
