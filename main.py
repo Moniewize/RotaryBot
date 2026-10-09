@@ -23,11 +23,11 @@ RECIPIENT_PHONE_NUMBER = os.getenv("RECIPIENT_PHONE_NUMBER", "")
 
 CUSTOM_FOOTER = os.getenv(
     "CUSTOM_FOOTER",
-    "*Source:* rotary.org\n*Brought by:* RAC-FUTO Editorial Team"
+    "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide.\n— Brought to you by The Editorial Team"
 )
 
 def clean_url(raw_url):
-    """Strips query parameters to ensure clean, direct rotary.org links."""
+    """Strips tracking query parameters to ensure clean, direct links."""
     if not raw_url:
         return ""
     parsed = urlparse(raw_url.strip())
@@ -38,112 +38,156 @@ def handle_global_exception(e):
     return make_response("OK", 200)
 
 
-# ==================== 1. FETCH EXCLUSIVELY FROM ROTARY.ORG RSS ====================
-def fetch_rotary_org_rss(now_utc):
-    """Parses official rotary.org RSS feed."""
-    rss_url = "https://www.rotary.org/rss.xml"
+# ==================== 1. PRIMARY SOURCE: ROTARY.ORG ====================
+def fetch_primary_rotary_org(now_utc):
+    """Parses primary official rotary.org RSS feed and direct newsroom scraper."""
     articles = []
 
+    # 1A. RSS Feed from rotary.org
     try:
-        feed = feedparser.parse(rss_url)
+        feed = feedparser.parse("https://www.rotary.org/rss.xml")
         for entry in feed.entries:
             title = getattr(entry, "title", "").strip()
             link = getattr(entry, "link", "").strip()
 
-            if not title or not link or "rotary.org" not in link:
-                continue
+            if title and link and "rotary.org" in link:
+                pub_dt = None
+                if hasattr(entry, "published_parsed") and entry.published_parsed:
+                    pub_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+                elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
+                    pub_dt = datetime.fromtimestamp(time.mktime(entry.updated_parsed), tz=timezone.utc)
 
-            pub_dt = None
-            if hasattr(entry, "published_parsed") and entry.published_parsed:
-                pub_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
-            elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
-                pub_dt = datetime.fromtimestamp(time.mktime(entry.updated_parsed), tz=timezone.utc)
+                if not pub_dt:
+                    pub_dt = now_utc
 
-            if not pub_dt:
-                pub_dt = now_utc
+                hours_old = (now_utc - pub_dt).total_seconds() / 3600.0
 
-            hours_old = (now_utc - pub_dt).total_seconds() / 3600.0
-
-            articles.append({
-                "title": title,
-                "url": clean_url(link),
-                "published_at": pub_dt,
-                "within_2_weeks": hours_old <= 336.0
-            })
+                articles.append({
+                    "title": title,
+                    "url": clean_url(link),
+                    "published_at": pub_dt,
+                    "within_2_weeks": hours_old <= 336.0,
+                    "priority": 1
+                })
     except Exception as e:
-        print(f"Error reading rotary.org RSS: {e}")
+        print(f"Error parsing primary RSS: {e}")
+
+    # 1B. Direct Web Scraper for rotary.org/en/news-and-stories
+    try:
+        url = "https://www.rotary.org/en/news-and-stories"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, "html.parser")
+            for a_tag in soup.find_all("a", href=True):
+                href = a_tag["href"]
+                if "/en/articles/" in href:
+                    title = a_tag.get_text(strip=True)
+                    if not title or len(title) < 15 or title.lower() in ["read more", "news and stories"]:
+                        continue
+
+                    full_url = urljoin("https://www.rotary.org", href)
+                    articles.append({
+                        "title": title,
+                        "url": clean_url(full_url),
+                        "published_at": now_utc - timedelta(days=1),
+                        "within_2_weeks": True,
+                        "priority": 1
+                    })
+    except Exception as e:
+        print(f"Error scraping primary rotary.org: {e}")
 
     return articles
 
 
-# ==================== 2. SCRAPE ROTARY.ORG DIRECTLY (EXCLUSIVE FALLBACK) ====================
-def scrape_rotary_org_newsroom(now_utc):
-    """Scrapes rotary.org news section if RSS returns fewer than 10 stories."""
-    url = "https://www.rotary.org/en/news-and-stories"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+# ==================== 2. SECONDARY & REGIONAL SOURCES ====================
+def fetch_secondary_rotary_feeds(now_utc):
+    """Parses Intercountry Committees, Rotary News Online, and Official Rotary Blogs."""
+    secondary_feeds = [
+        ("Rotary Intercountry Committees", "https://rotary-icc.org/feed/", 2),
+        ("Rotary News Online", "https://rotarynewsonline.org/feed/", 3),
+        ("Rotary Voices / Blog", "https://blog.rotary.org/feed/", 4)
+    ]
 
-    scraped = []
+    articles = []
 
-    try:
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code != 200:
-            return []
+    for source_name, feed_url, priority in secondary_feeds:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries:
+                title = getattr(entry, "title", "").strip()
+                link = getattr(entry, "link", "").strip()
 
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"]
-            if "/en/articles/" in href:
-                title = a_tag.get_text(strip=True)
-                if not title or len(title) < 15 or title.lower() in ["read more", "news and stories"]:
+                if not title or not link:
                     continue
 
-                full_url = urljoin("https://www.rotary.org", href)
-                scraped.append({
+                pub_dt = None
+                if hasattr(entry, "published_parsed") and entry.published_parsed:
+                    pub_dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+                elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
+                    pub_dt = datetime.fromtimestamp(time.mktime(entry.updated_parsed), tz=timezone.utc)
+
+                if not pub_dt:
+                    pub_dt = now_utc
+
+                hours_old = (now_utc - pub_dt).total_seconds() / 3600.0
+
+                articles.append({
                     "title": title,
-                    "url": clean_url(full_url),
-                    "published_at": now_utc - timedelta(days=15),  # Secondary fallback priority
-                    "within_2_weeks": False
+                    "url": clean_url(link),
+                    "published_at": pub_dt,
+                    "within_2_weeks": hours_old <= 336.0,
+                    "priority": priority
                 })
-    except Exception as e:
-        print(f"Error scraping rotary.org: {e}")
+        except Exception as e:
+            print(f"Error parsing feed {source_name}: {e}")
 
-    return scraped
+    return articles
 
 
-# ==================== 3. AGGREGATE 10 EXCLUSIVE ROTARY.ORG STORIES ====================
+# ==================== 3. AGGREGATION & HIERARCHICAL SELECTION ====================
 def get_top_10_rotary_news():
-    """Aggregates strictly from rotary.org, prioritizing <= 2-week articles."""
+    """Builds top 10 articles strictly adhering to site hierarchy and date recency."""
     now_utc = datetime.now(timezone.utc)
 
-    rss_items = fetch_rotary_org_rss(now_utc)
-    scraped_items = scrape_rotary_org_newsroom(now_utc)
+    # Fetch primary site news first
+    primary_candidates = fetch_primary_rotary_org(now_utc)
+    
+    # Fetch secondary regional feeds
+    secondary_candidates = fetch_secondary_rotary_feeds(now_utc)
 
-    all_candidates = rss_items + scraped_items
+    all_candidates = primary_candidates + secondary_candidates
 
     recent_articles = []
     older_articles = []
     seen_urls = set()
+    seen_titles = set()
 
     for item in all_candidates:
         clean_link = item["url"]
-        if clean_link in seen_urls:
+        title_key = item["title"].lower()[:30]
+
+        if clean_link in seen_urls or title_key in seen_titles:
             continue
+
         seen_urls.add(clean_link)
+        seen_titles.add(title_key)
 
         if item["within_2_weeks"]:
             recent_articles.append(item)
         else:
             older_articles.append(item)
 
-    recent_articles.sort(key=lambda x: x["published_at"], reverse=True)
-    older_articles.sort(key=lambda x: x["published_at"], reverse=True)
+    # Sort recent articles: Primary site priority first, then publication date descending
+    recent_articles.sort(key=lambda x: (x["priority"], -x["published_at"].timestamp()))
+    older_articles.sort(key=lambda x: (x["priority"], -x["published_at"].timestamp()))
 
-    # Combine: Priority to 2-week news, older rotary.org news at bottom
+    # Select top 10: Prioritize <= 2-week news first
     final_selection = recent_articles[:10]
 
+    # Fill remaining slots with older official articles if recent items are under 10
     if len(final_selection) < 10:
         needed = 10 - len(final_selection)
         final_selection.extend(older_articles[:needed])
@@ -154,8 +198,8 @@ def get_top_10_rotary_news():
 # ==================== 4. PAYLOAD FORMATTING ====================
 def format_whatsapp_message(articles, footer_text=""):
     message_lines = [
-        "*Rotary & Rotaract Global News Update*\n",
-        "Here are top official reports and featured initiatives that you don't want to miss:\n"
+        "📌 *Rotary & Rotaract Global News Update*\n",
+        "Here are today's top official reports and featured projects:\n"
     ]
 
     for idx, art in enumerate(articles, 1):
