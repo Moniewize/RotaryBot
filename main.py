@@ -31,7 +31,7 @@ shortener = pyshorteners.Shortener()
 
 
 def shorten_url(url):
-    """Shortens a URL using TinyURL, falling back to original if shortening fails."""
+    """Shortens long news links to TinyURL for a clean WhatsApp layout."""
     try:
         return shortener.tinyurl.short(url)
     except Exception:
@@ -49,7 +49,8 @@ def fetch_rotary_news():
     now = datetime.now(timezone.utc)
     two_weeks_ago = now - timedelta(days=14)
 
-    query = 'Rotary OR Rotaract OR "Interact Club" OR "PolioPlus" OR "Paul Harris"'
+    # Multi-term parenthesized query
+    query = '(Rotary OR Rotaract OR "Interact Club" OR PolioPlus OR "Paul Harris")'
 
     params = {
         "q": query,
@@ -57,12 +58,12 @@ def fetch_rotary_news():
         "to": now.strftime("%Y-%m-%d"),
         "sortBy": "publishedAt",
         "language": "en",
-        "pageSize": 60,
+        "pageSize": 100,  # Max payload size to ensure we get at least 10 valid headlines
         "apiKey": NEWS_API_KEY
     }
 
     try:
-        response = requests.get("https://newsapi.org/v2/everything", params=params, timeout=6)
+        response = requests.get("https://newsapi.org/v2/everything", params=params, timeout=8)
         if response.status_code != 200:
             return []
         data = response.json()
@@ -74,6 +75,7 @@ def fetch_rotary_news():
 
     articles = data.get("articles", [])
     valid_articles = []
+    seen_titles = set()
 
     junk_keywords = [
         "tool", "saw", "compressor", "encoder", "switch", 
@@ -113,13 +115,19 @@ def fetch_rotary_news():
         desc = (article.get("description") or "").strip()
         article_url = (article.get("url") or "").strip()
 
+        # Prevent duplicate stories from different RSS feeds
+        title_key = title.lower()[:30]
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+
         text_content = f"{title} {desc} {article_url}".lower()
 
-        # Drop mechanical, e-commerce, or industrial junk
+        # Filter out industrial or mechanical junk
         if any(junk in text_content for junk in junk_keywords):
             continue
 
-        # Check organizational relevance against extended vocabulary
+        # Check organizational relevance
         matched_terms = [kw for kw in rotary_vocab if kw in text_content]
         if matched_terms:
             high_priority_terms = [
@@ -145,7 +153,7 @@ def fetch_rotary_news():
     return valid_articles
 
 
-# ==================== 2. CUSTOM SORTING & EXPANSION ====================
+# ==================== 2. SELECT TOP 10 ARTICLES ====================
 def sort_and_select_articles(articles):
     tier_1, tier_2, tier_3, tier_4 = [], [], [], []
 
@@ -168,9 +176,9 @@ def sort_and_select_articles(articles):
     tier_4.sort(key=lambda x: x["published_at"], reverse=True)
 
     sorted_list = tier_1 + tier_2 + tier_3 + tier_4
-    target_count = 10 if len(sorted_list) >= 10 else len(sorted_list)
-
-    return sorted_list[:target_count]
+    
+    # Enforce exactly 10 headlines (or as many as exist up to 10)
+    return sorted_list[:10]
 
 
 # ==================== 3. PAYLOAD FORMATTING ====================
@@ -203,7 +211,7 @@ def send_whatsapp_message(message_text):
     headers = {'Content-Type': 'application/json'}
 
     try:
-        requests.post(url, json=payload, headers=headers, timeout=6)
+        requests.post(url, json=payload, headers=headers, timeout=8)
     except Exception:
         pass
 
