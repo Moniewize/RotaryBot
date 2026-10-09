@@ -1,16 +1,14 @@
 import os
-import re
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse
 from flask import Flask, make_response
 import requests
-from bs4 import BeautifulSoup
+import feedparser
 from dateutil import parser
 
 # ==================== FLASK APPLICATION INSTANCE ====================
 app = Flask(__name__)
 
-# Keep HTTP headers minimal for cron-job.org compatibility
 @app.after_request
 def minimize_headers(response):
     response.headers.clear()
@@ -28,71 +26,53 @@ CUSTOM_FOOTER = os.getenv(
     "Stay connected with us for daily updates on global community impact, leadership initiatives, and service projects across Rotary and Rotaract networks worldwide.\n— Brought to you by The Editorial Team"
 )
 
-
 def clean_url(raw_url):
-    """Strips query parameters (e.g., tracking tags) to yield a clean, direct link."""
+    """Strips query/tracking parameters to return a clean, direct URL."""
     if not raw_url:
         return ""
     parsed = urlparse(raw_url.strip())
-    # Rebuild URL without query strings or fragments
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
-
 
 @app.errorhandler(Exception)
 def handle_global_exception(e):
     return make_response("OK", 200)
 
 
-# ==================== 1. DIRECT SCRAPER FOR ROTARY.ORG ====================
-def scrape_official_rotary_site():
-    """Scrapes official news directly from Rotary International's portal."""
-    url = "https://www.rotary.org/en/news-and-stories"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-
+# ==================== 1. FETCH FROM OFFICIAL ROTARY RSS FEEDS ====================
+def fetch_rotary_rss_news():
+    """Parses official RSS feeds to ensure 100% Rotary and Rotaract content."""
+    rss_urls = [
+        "https://rotarynewsonline.org/feed/",
+        "https://blog.rotary.org/feed/"
+    ]
+    
     scraped_articles = []
-
-    try:
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code != 200:
-            return []
-
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        # Locate all article cards and anchor tags containing links
-        for a_tag in soup.find_all("a", href=True):
-            href = a_tag["href"]
-            
-            # Select relevant article paths
-            if "/en/articles/" in href or "/en/news-and-stories" in href:
-                title = a_tag.get_text(strip=True)
+    
+    for feed_url in rss_urls:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries:
+                title = getattr(entry, "title", "").strip()
+                link = getattr(entry, "link", "").strip()
                 
-                # Filter out navigation links, empty titles, and short buttons
-                if not title or len(title) < 20 or title.lower() in ["read more", "news and stories", "all news and stories"]:
-                    continue
-
-                full_url = urljoin("https://www.rotary.org", href)
-                direct_url = clean_url(full_url)
-
-                scraped_articles.append({
-                    "title": title,
-                    "url": direct_url,
-                    "source": "Rotary International (Official)"
-                })
-
-    except Exception as e:
-        print(f"Error scraping rotary.org: {e}")
+                if title and link:
+                    scraped_articles.append({
+                        "title": title,
+                        "url": clean_url(link)
+                    })
+        except Exception as e:
+            print(f"Error reading RSS feed {feed_url}: {e}")
 
     return scraped_articles
 
 
-# ==================== 2. FALLBACK FETCH FROM NEWSAPI ====================
-def fetch_newsapi_articles(limit=10):
-    """Fetches additional news from global news providers via NewsAPI as backup/supplement."""
+# ==================== 2. FALLBACK VIA STRICT NEWSAPI ====================
+def fetch_newsapi_articles(needed_count=10):
+    """Fetches secondary news via NewsAPI with strict organizational filtering."""
     now = datetime.now(timezone.utc)
     two_weeks_ago = now - timedelta(days=14)
 
+    # Multi-term query
     query = '(Rotary OR Rotaract OR "Interact Club" OR PolioPlus OR "Paul Harris")'
 
     params = {
@@ -101,7 +81,7 @@ def fetch_newsapi_articles(limit=10):
         "to": now.strftime("%Y-%m-%d"),
         "sortBy": "publishedAt",
         "language": "en",
-        "pageSize": 50,
+        "pageSize": 60,
         "apiKey": NEWS_API_KEY
     }
 
@@ -118,60 +98,73 @@ def fetch_newsapi_articles(limit=10):
 
     articles = data.get("articles", [])
     valid_articles = []
-    junk_keywords = ["tool", "saw", "compressor", "encoder", "engine", "drill", "rig", "piston"]
+
+    # Mandatory organizational keywords (headline MUST contain one)
+    required_keywords = [
+        "rotary", "rotaract", "interact", "polio", 
+        "paul harris", "district governor", "drr", "ryla"
+    ]
+
+    # Explicit junk exclusion list
+    junk_keywords = [
+        "tool", "saw", "compressor", "encoder", "switch", 
+        "engine", "drill", "rig", "piston", "wrestler", "hardware"
+    ]
 
     for article in articles:
         title = (article.get("title") or "").strip()
         raw_url = (article.get("url") or "").strip()
-        
-        if not title or not raw_url or any(junk in title.lower() for junk in junk_keywords):
+        title_lower = title.lower()
+
+        # Reject non-Rotary mechanical items
+        if any(junk in title_lower for junk in junk_keywords):
             continue
 
-        valid_articles.append({
-            "title": title,
-            "url": clean_url(raw_url),
-            "source": "Global News"
-        })
+        # STRICT CHECK: Title MUST contain a Rotary/Rotaract keyword
+        if any(req in title_lower for req in required_keywords):
+            valid_articles.append({
+                "title": title,
+                "url": clean_url(raw_url)
+            })
 
-    return valid_articles[:limit]
+    return valid_articles[:needed_count]
 
 
-# ==================== 3. COMBINE & DEDUPLICATE RESULTS ====================
-def get_combined_rotary_news():
-    """Combines direct official site scrapes with fallback global news to guarantee 10 stories."""
-    official_news = scrape_official_rotary_site()
-    
-    final_list = []
+# ==================== 3. AGGREGATE 10 DISTINCT STORIES ====================
+def get_top_10_rotary_news():
+    """Aggregates RSS feeds and strict NewsAPI items to yield exactly 10 stories."""
+    combined = []
     seen_titles = set()
 
-    # Priority 1: Add official rotary.org articles
-    for item in official_news:
+    # Priority 1: RSS Feeds
+    rss_news = fetch_rotary_rss_news()
+    for item in rss_news:
         title_key = item["title"].lower()[:30]
         if title_key not in seen_titles:
             seen_titles.add(title_key)
-            final_list.append(item)
+            combined.append(item)
 
-    # Priority 2: Fill remaining slots up to 10 with NewsAPI results
-    if len(final_list) < 10:
-        needed = 10 - len(final_list)
-        fallback_news = fetch_newsapi_articles(limit=needed * 2)
+    # Priority 2: Strict NewsAPI fallback if RSS yields under 10
+    if len(combined) < 10:
+        needed = 10 - len(combined)
+        backup_news = fetch_newsapi_articles(needed_count=needed * 2)
         
-        for item in fallback_news:
+        for item in backup_news:
             title_key = item["title"].lower()[:30]
             if title_key not in seen_titles:
                 seen_titles.add(title_key)
-                final_list.append(item)
-                if len(final_list) == 10:
+                combined.append(item)
+                if len(combined) == 10:
                     break
 
-    return final_list[:10]
+    return combined[:10]
 
 
 # ==================== 4. PAYLOAD FORMATTING ====================
 def format_whatsapp_message(articles, footer_text=""):
     message_lines = [
         "📌 *Rotary & Rotaract Global News Update*\n",
-        "Here are the top reports and featured initiatives directly from Rotary networks:\n"
+        "Here are today's top reports and featured initiatives:\n"
     ]
 
     for idx, art in enumerate(articles, 1):
@@ -207,7 +200,7 @@ def run_cron_job():
     if not all([GREEN_API_ID_INSTANCE, GREEN_API_TOKEN_INSTANCE, RECIPIENT_PHONE_NUMBER]):
         return make_response("OK", 200)
 
-    selected_articles = get_combined_rotary_news()
+    selected_articles = get_top_10_rotary_news()
 
     if not selected_articles:
         no_news_msg = "📌 *Rotary & Rotaract Global News Update*\n\nNo major Rotary news reports were found.\n\n" + CUSTOM_FOOTER.strip()
